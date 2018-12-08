@@ -1,22 +1,14 @@
-extern crate chrono;
 extern crate dbus;
-extern crate timer;
 
 use std::env;
 use std::error::Error;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc,Mutex};
 use std::sync::atomic::{AtomicBool,Ordering};
-use std::sync::mpsc::{channel,RecvTimeoutError,Sender};
-use std::time::Duration;
-use std::thread;
+use std::time::{Duration,SystemTime};
 
 use dbus::{BusType,Connection,Message,NameFlag};
 use dbus::tree::Factory;
-
-use timer::{Guard,Timer};
-
-/* TODO: do not run a deactivate thread if we are supposed to be enabled */
 
 fn main() {
     let args : Vec<String> = env::args().collect();
@@ -58,70 +50,71 @@ fn main() {
     }
 
     let quitter = Arc::new(AtomicBool::new(false));
-    let disabler_quitter = quitter.clone();
     let do_disable = Arc::new(AtomicBool::new(false));
-    let disabler_do_disable = do_disable.clone();
+    let enable_timestamp : Arc<Mutex<Option<SystemTime>>> = Arc::new(Mutex::new(None));
 
-    let (channel_sender,channel_receiver) = channel();
-
-    thread::spawn(move || { disabling_loop(disabler_quitter, disabler_do_disable) });
-    let connection = initialize_connection(quitter.clone(), do_disable.clone(), channel_sender).unwrap();
-
-    let timer = Timer::new();
-    let mut _guard : Option<Guard> = None;
+    let connection = initialize_connection(quitter.clone(), do_disable.clone(), enable_timestamp.clone()).unwrap();
 
     loop {
-        connection.incoming(1000).next();
+        connection.incoming(30_000).next();
+        println!(".");
         if quitter.load(Ordering::Relaxed) {
             break;
         }
-        let received = channel_receiver.recv_timeout(Duration::new(1, 0));
-        match received {
-            Ok(val) => {
-                match val {
-                    None => { _guard = None }
-                    Some(seconds) => {
-                        let _timer_do_disable = do_disable.clone();
-                        _guard = Some(timer.schedule_with_delay(chrono::Duration::seconds(seconds),
-                                                                move || {_timer_do_disable.store(false, Ordering::Relaxed)}))
+        {
+            let mut ts_locked = enable_timestamp.lock().unwrap();
+            match *ts_locked {
+                None => {}
+                Some(timestamp) => {
+                    if SystemTime::now() > timestamp {
+                        println!("Timeout passed, enabling screensaver again");
+                        do_disable.store(false, Ordering::Relaxed);
+                        *ts_locked = None;
+                        continue;
                     }
                 }
             }
-            Err(RecvTimeoutError::Timeout) => { continue }
-            Err(err) => {
-                println!("Error while receiving from the channel: {:?}", err);
-                quitter.store(false, Ordering::Relaxed)
-            }
         }
+        if !do_disable.load(Ordering::Relaxed) {
+            continue;
+        }
+        if screensaver_activated() {
+            continue;
+        }
+        Command::new("sh")
+            .arg("-c").arg("xscreensaver-command -deactivate")
+            .output().expect("Failed to run 'xscreensaver-command -deactivate'");
     }
 }
 
-fn initialize_connection(quitter : Arc<AtomicBool>, do_disable : Arc<AtomicBool>, channel_to_timer : Sender<Option<i64>>) -> Result<Connection, Box<dyn Error>> {
+fn initialize_connection(quitter : Arc<AtomicBool>, do_disable : Arc<AtomicBool>, enable_timestamp : Arc<Mutex<Option<SystemTime>>>) -> Result<Connection, Box<dyn Error>> {
     let c = Connection::get_private(BusType::Session)?;
     c.register_name("net.andresovi.xees", NameFlag::ReplaceExisting as u32)?;
     let f = Factory::new_fn::<()>();
     let enable_do_disable = do_disable.clone();
     let status_do_disable = do_disable.clone();
-    let enable_channel_to_timer = channel_to_timer.clone();
+    let enable_enable_timestamp = enable_timestamp.clone();
     let tree = f.tree(()).add(f.object_path("/", ()).introspectable().add(
             f.interface("net.andresovi.xees", ())
                         .add_m(
                             f.method("Enable", (), move |m| {
                                 println!("=== Enable");
                                 enable_do_disable.store(false, Ordering::Relaxed);
-                                enable_channel_to_timer.send(None).expect("Cannot send a message to timer thread");
+                                *enable_enable_timestamp.lock().unwrap() = None;
                                 Ok(vec![m.msg.method_return().append1("ok")])
                             }).outarg::<&str,_>("reply")
                             )
                         .add_m(
                             f.method("Disable", (), move |m| {
-                                let timeout = match m.msg.get1() {
-                                    None => { Some(3600) }
-                                    val  => { val } // TODO: ensure we get a i64 value here
-                                };
-                                println!("=== Disable {:?}", timeout);
+                                println!("=== Disable");
                                 do_disable.store(true, Ordering::Relaxed);
-                                channel_to_timer.send(timeout).expect("Cannot send a message to timer thread");
+                                match m.msg.get1() {
+                                    None => { println!("===no duration"); *enable_timestamp.lock().unwrap() = Some(SystemTime::now() + Duration::new(12,0)); }
+                                    Some(val)  => { // TODO: ensure we get a i64 value here
+                                        println!("=== Disable timestamp: {:?}", SystemTime::now() + Duration::new(val,0));
+                                        *enable_timestamp.lock().unwrap() = Some(SystemTime::now() + Duration::new(val,0));
+                                    }
+                                };
                                 Ok(vec![m.msg.method_return().append1("ok")])
                             })
                             .inarg::<&str,_>("duration")
@@ -169,24 +162,6 @@ fn call_it_quit() {
     connection.send_with_reply_and_block(m, 2000).unwrap();
 }
 
-fn disabling_loop(quitter : Arc<AtomicBool>, do_disable : Arc<AtomicBool>) {
-    loop {
-        if quitter.load(Ordering::Relaxed) {
-            break;
-        }
-        thread::sleep(Duration::new(30,0));
-        if !do_disable.load(Ordering::Relaxed) {
-            continue;
-        }
-        if screensaver_activated() {
-            continue;
-        }
-        Command::new("sh")
-            .arg("-c").arg("xscreensaver-command -deactivate")
-            .output().expect("Failed to run 'xscreensaver-command -deactivate'");
-    }
-}
-
 fn screensaver_activated() -> bool {
     /*
      * [fandres@greed ~]$ while true; do xscreensaver-command -time; sleep 5; done
@@ -196,7 +171,7 @@ fn screensaver_activated() -> bool {
     let output = Command::new("sh")
         .arg("-c").arg("xscreensaver-command -time")
         .output().expect("Failed to run 'xscreensaver -time'");
-    if String::from_utf8_lossy(&output.stdout).contains("screen locked") { // at least now I don't have two problems
+    if String::from_utf8_lossy(&output.stdout).contains("screen locked") { // at least I don't have two problems now
         return true
     }
     return false
