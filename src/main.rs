@@ -14,24 +14,16 @@ fn main() {
     let args : Vec<String> = env::args().collect();
     if args.len() > 1 {
         match args[1].as_str() {
-            "list" => {
-                list_all();
-                return
-            }
             "quit" => {
                 call_it_quit();
                 return
             }
             "disable" => {
-                let how_long : i64 = match args.len() {
-                    2 => {
-                        3600
-                    }
-                    _ => {
-                        args[2].parse().unwrap()
-                    }
+                if args.len() == 2 {
+                    call_disable(None);
+                } else {
+                    call_disable(Some(args[2].parse().unwrap()));
                 };
-                call_disable(how_long);
                 return
             }
             "enable" => {
@@ -57,7 +49,6 @@ fn main() {
 
     loop {
         connection.incoming(30_000).next();
-        println!(".");
         if quitter.load(Ordering::Relaxed) {
             break;
         }
@@ -67,7 +58,7 @@ fn main() {
                 None => {}
                 Some(timestamp) => {
                     if SystemTime::now() > timestamp {
-                        println!("Timeout passed, enabling screensaver again");
+                        println!("Screensaver enabled, timeout passed");
                         do_disable.store(false, Ordering::Relaxed);
                         *ts_locked = None;
                         continue;
@@ -98,7 +89,7 @@ fn initialize_connection(quitter : Arc<AtomicBool>, do_disable : Arc<AtomicBool>
             f.interface("net.andresovi.xees", ())
                         .add_m(
                             f.method("Enable", (), move |m| {
-                                println!("=== Enable");
+                                println!("Screensaver enabled");
                                 enable_do_disable.store(false, Ordering::Relaxed);
                                 *enable_enable_timestamp.lock().unwrap() = None;
                                 Ok(vec![m.msg.method_return().append1("ok")])
@@ -106,22 +97,25 @@ fn initialize_connection(quitter : Arc<AtomicBool>, do_disable : Arc<AtomicBool>
                             )
                         .add_m(
                             f.method("Disable", (), move |m| {
-                                println!("=== Disable");
                                 do_disable.store(true, Ordering::Relaxed);
-                                match m.msg.get1() {
-                                    None => { println!("===no duration"); *enable_timestamp.lock().unwrap() = Some(SystemTime::now() + Duration::new(12,0)); }
-                                    Some(val)  => { // TODO: ensure we get a i64 value here
-                                        println!("=== Disable timestamp: {:?}", SystemTime::now() + Duration::new(val,0));
+                                match m.msg.read1() {
+                                    Ok(val)  => {
+                                        println!("Screensaveer disabled for {}s", val);
                                         *enable_timestamp.lock().unwrap() = Some(SystemTime::now() + Duration::new(val,0));
+                                    }
+                                    Err(_) => { // Missing or invalid duration => disable forever
+                                        println!("Screensaver disabled indefinitely");
+                                        *enable_timestamp.lock().unwrap() = None;
                                     }
                                 };
                                 Ok(vec![m.msg.method_return().append1("ok")])
                             })
-                            .inarg::<&str,_>("duration")
+                            .inarg::<u64,_>("duration")
                             .outarg::<&str,_>("reply")
                             )
                         .add_m(
                             f.method("Status", (), move |m| {
+                                println!("Status called");
                                 let msg = match status_do_disable.load(Ordering::Relaxed) {
                                     true => "Disabled",
                                     false => "Enabled"
@@ -135,25 +129,10 @@ fn initialize_connection(quitter : Arc<AtomicBool>, do_disable : Arc<AtomicBool>
                                 Ok(vec![m.msg.method_return().append1("quitting")])
                             }).outarg::<&str,_>("reply")
                             )
-                        .add_m(
-                            f.method("Test", (), |m| {
-                                println!("{:?}", m.msg.get_items()); // print message items we got as arguments of a method call
-                                Ok(vec![m.msg.method_return().append1("test_reply")])
-                            })
-                            .inarg::<&str,_>("duration")
-                            .outarg::<&str,_>("reply")
-                            )
         ));
     tree.set_registered(&c, true)?;
     c.add_handler(tree);
     Ok(c)
-}
-
-fn list_all() {
-    let connection = Connection::get_private(BusType::Session).unwrap();
-    let m = Message::new_method_call("net.andresovi.xees", "/", "net.andresovi.xees", "Test").unwrap().append("arg1");
-    let r = connection.send_with_reply_and_block(m, 2000).unwrap();
-    println!("---1\n{:?}", r.get_items()); // print message items we got in return
 }
 
 fn call_it_quit() {
@@ -177,11 +156,13 @@ fn screensaver_activated() -> bool {
     return false
 }
 
-fn call_disable(period : i64) {
+fn call_disable(period : Option<u64>) {
     let connection = Connection::get_private(BusType::Session).unwrap();
-    let m = Message::new_method_call("net.andresovi.xees", "/", "net.andresovi.xees", "Disable")
-        .unwrap()
-        .append1(period);
+    let mut m = Message::new_method_call("net.andresovi.xees", "/", "net.andresovi.xees", "Disable")
+        .unwrap();
+    if let Some(seconds) = period {
+        m = m.append1(seconds);
+    }
     connection.send_with_reply_and_block(m, 2000).unwrap();
 }
 
