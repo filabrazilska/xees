@@ -1,0 +1,3 @@
+A thin DBUS-enabled wrapper around xscreensaver. Allows to disable xscreensaver
+for the specified period (or indefinitely).
+Written mostly to have an excuse to play with rust.
