@@ -5,6 +5,7 @@ use std::error::Error;
 use std::process::Command;
 use std::sync::{Arc,Mutex};
 use std::sync::atomic::{AtomicBool,Ordering};
+use std::thread;
 use std::time::{Duration,SystemTime};
 
 use dbus::{BusType,Connection,Message,NameFlag};
@@ -42,13 +43,21 @@ fn main() {
     }
 
     let quitter = Arc::new(AtomicBool::new(false));
+    let dbus_quitter = quitter.clone();
     let do_disable = Arc::new(AtomicBool::new(false));
+    let dbus_do_disable = do_disable.clone();
     let enable_timestamp : Arc<Mutex<Option<SystemTime>>> = Arc::new(Mutex::new(None));
+    let dbus_enable_timestamp = enable_timestamp.clone();
 
-    let connection = initialize_connection(quitter.clone(), do_disable.clone(), enable_timestamp.clone()).unwrap();
+    thread::spawn(move || {
+        let connection = initialize_connection(dbus_quitter, dbus_do_disable, dbus_enable_timestamp).unwrap();
+        loop {
+            connection.incoming(30_000).next();
+        }
+    });
 
     loop {
-        connection.incoming(30_000).next();
+        thread::sleep(Duration::new(1,0));
         if quitter.load(Ordering::Relaxed) {
             break;
         }
