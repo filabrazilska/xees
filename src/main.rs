@@ -31,6 +31,10 @@ fn main() {
                 call_enable();
                 return
             }
+            "activate" => {
+                call_activate();
+                return
+            }
             "status" => {
                 call_status();
                 return
@@ -123,6 +127,15 @@ fn initialize_connection(quitter : Arc<AtomicBool>, do_disable : Arc<AtomicBool>
                             .outarg::<&str,_>("reply")
                             )
                         .add_m(
+                            f.method("Activate", (), move |m| {
+                                println!("Screensaver activated");
+                                Command::new("sh")
+                                    .arg("-c").arg("xscreensaver-command -activate")
+                                    .output().expect("Failed to run 'xscreensaver-command -activate'");
+                                Ok(vec![m.msg.method_return().append1("ok")])
+                            })
+                            )
+                        .add_m(
                             f.method("Status", (), move |m| {
                                 println!("Status called");
                                 let msg = match status_do_disable.load(Ordering::Relaxed) {
@@ -186,4 +199,10 @@ fn call_status() {
     let m = Message::new_method_call("net.andresovi.xees", "/", "net.andresovi.xees", "Status").unwrap();
     let status : String = connection.send_with_reply_and_block(m, 2000).unwrap().get1().unwrap();
     println!("{}", status);
+}
+
+fn call_activate() {
+    let connection = Connection::get_private(BusType::Session).unwrap();
+    let m = Message::new_method_call("net.andresovi.xees", "/", "net.andresovi.xees", "Activate").unwrap();
+    connection.send_with_reply_and_block(m, 2000).unwrap();
 }
