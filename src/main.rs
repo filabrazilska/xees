@@ -138,9 +138,10 @@ fn initialize_connection(quitter : Arc<AtomicBool>, do_disable : Arc<AtomicBool>
                         .add_m(
                             f.method("Status", (), move |m| {
                                 println!("Status called");
-                                let msg = match status_do_disable.load(Ordering::Relaxed) {
-                                    true => "Disabled",
-                                    false => "Enabled"
+                                let msg = match (screensaver_running(), status_do_disable.load(Ordering::Relaxed)) {
+                                    (false, _) => "Stopped",
+                                    (_, true)  => "Disabled",
+                                    (_, false) => "Enabled",
                                 };
                                 Ok(vec![m.msg.method_return().append1(msg)])
                             })
@@ -161,6 +162,20 @@ fn call_it_quit() {
     let connection = Connection::get_private(BusType::Session).unwrap();
     let m = Message::new_method_call("net.andresovi.xees", "/", "net.andresovi.xees", "Quit").unwrap();
     connection.send_with_reply_and_block(m, 2000).unwrap();
+}
+
+fn screensaver_running() -> bool {
+    /*
+     * [fandres@greed ~]$ xscreensaver-command -time
+     * xscreensaver-command: no screensaver is running on display :0
+    */
+    let output = Command::new("sh")
+        .arg("-c").arg("xscreensaver-command -time")
+        .output().expect("Failed to check whether xscreensaver is running");
+    if String::from_utf8_lossy(&output.stderr).contains("no screensaver is running on display") {
+        return false
+    }
+    return true
 }
 
 fn screensaver_activated() -> bool {
